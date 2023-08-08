@@ -31,14 +31,21 @@ import com.amazonaws.services.s3.model.SSECustomerKey;
 import com.amazonaws.services.s3.model.UploadPartRequest;
 import io.confluent.connect.s3.S3SinkConnectorConfig;
 import io.confluent.connect.storage.common.util.StringUtils;
+import org.apache.kafka.connect.errors.DataException;
 import org.apache.parquet.io.PositionOutputStream;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.apache.commons.codec.digest.DigestUtils;
 
-import java.io.ByteArrayInputStream;
-import java.io.IOException;
-import java.io.OutputStream;
+import java.io.*;
+import java.security.DigestInputStream;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
+import java.util.Base64;
+
+import java.nio.ByteBuffer;
 import java.util.ArrayList;
+import java.util.Date;
 import java.util.List;
 import java.util.function.Supplier;
 
@@ -50,6 +57,7 @@ import java.util.function.Supplier;
 public class S3OutputStream extends PositionOutputStream {
   private static final Logger log = LoggerFactory.getLogger(S3OutputStream.class);
   private final AmazonS3 s3;
+    private final S3SinkConnectorConfig connectorConfig;
   private final String bucket;
   private final String key;
   private final String ssea;
@@ -59,7 +67,7 @@ public class S3OutputStream extends PositionOutputStream {
   private final int partSize;
   private final CannedAccessControlList cannedAcl;
   private boolean closed;
-  private final ByteBuf buffer;
+    private ByteBuffer buffer;
   private MultipartUpload multiPartUpload;
   private final CompressionType compressionType;
   private final int compressionLevel;
@@ -68,6 +76,7 @@ public class S3OutputStream extends PositionOutputStream {
 
   public S3OutputStream(String key, S3SinkConnectorConfig conf, AmazonS3 s3) {
     this.s3 = s3;
+        this.connectorConfig = conf;
     this.bucket = conf.getBucketName();
     this.key = key;
     this.ssea = conf.getSsea();
@@ -79,15 +88,7 @@ public class S3OutputStream extends PositionOutputStream {
     this.partSize = conf.getPartSize();
     this.cannedAcl = conf.getCannedAcl();
     this.closed = false;
-
-    final boolean elasticBufEnable = conf.getElasticBufferEnable();
-    if (elasticBufEnable) {
-      final int elasticBufInitialCap = conf.getElasticBufferInitCap();
-      this.buffer = new ElasticByteBuffer(this.partSize, elasticBufInitialCap);
-    } else {
-      this.buffer = new SimpleByteBuffer(this.partSize);
-    }
-
+        this.buffer = ByteBuffer.allocate(this.partSize);
     this.progressListener = new ConnectProgressListener();
     this.multiPartUpload = null;
     this.compressionType = conf.getCompressionType();
@@ -169,14 +170,9 @@ public class S3OutputStream extends PositionOutputStream {
       }
       multiPartUpload.complete();
       log.debug("Upload complete for bucket '{}' key '{}'", bucket, key);
-    } catch (IOException e) {
-      log.error(
-          "Multipart upload failed to complete for bucket '{}' key '{}'. Reason: {}",
-          bucket,
-          key,
-          e.getMessage()
-      );
-      throw e;
+        } catch (Exception e) {
+            log.error("Multipart upload failed to complete for bucket '{}' key '{}'", bucket, key);
+            throw new DataException("Multipart upload failed to complete.", e);
     } finally {
       buffer.clear();
       multiPartUpload = null;
@@ -234,6 +230,7 @@ public class S3OutputStream extends PositionOutputStream {
    * Return the given Supplier value, converting any thrown AmazonClientException object
    * to an IOException object (containing the AmazonClientException object) and
    * throw that instead.
+     *
    * @param supplier The supplier to evaluate
    * @param <T> The object type returned by the Supplier
    * @return The value returned by the Supplier
@@ -263,19 +260,80 @@ public class S3OutputStream extends PositionOutputStream {
       );
     }
 
+        public File convertByteArrayInputStreamToFile(ByteArrayInputStream inputStream, String filePath) {
+            File file = new File(filePath);
+            try (FileOutputStream fileOutputStream = new FileOutputStream(file)) {
+                byte[] buffer = new byte[1024];
+                int bytesRead;
+                while ((bytesRead = inputStream.read(buffer)) != -1) {
+                    fileOutputStream.write(buffer, 0, bytesRead);
+                }
+            } catch (IOException e) {
+                e.printStackTrace();
+                // Handle the exception as per your application's requirement
+            } finally {
+                // Close the ByteArrayInputStream (optional, since it doesn't have associated resources)
+                try {
+                    inputStream.close();
+                } catch (IOException e) {
+                    e.printStackTrace();
+                }
+            }
+            log.info("Success in file creation");
+            return file;
+        }
+
+
     public void uploadPart(ByteArrayInputStream inputStream, int partSize) {
       int currentPartNumber = partETags.size() + 1;
+            String subUploadId = uploadId.substring(uploadId.length() - 10);
+            String sourceFilePath = "/tmp/tempfile/tempSourceFile" +subUploadId+ String.valueOf(new Date().getTime()) + ".json";
+            String md5FilePath = "/tmp/tempfile/tempMD5File" +subUploadId+ String.valueOf(new Date().getTime()) + ".json";
+            File s3File = convertByteArrayInputStreamToFile(inputStream, sourceFilePath);
+            File md5File = new File(md5FilePath);
+
+            try (BufferedReader reader = new BufferedReader(new FileReader(s3File));
+                 BufferedWriter writer = new BufferedWriter(new FileWriter(md5File))) {
+
+                String line;
+                int lineCount = 0;
+
+                while ((line = reader.readLine()) != null && lineCount < connectorConfig.getInt(S3SinkConnectorConfig.FLUSH_SIZE_CONFIG)) {
+                    writer.write(line);
+                    writer.newLine();
+                    lineCount++;
+                }
+
+            } catch (IOException e) {
+                e.printStackTrace();
+            }
+            log.info("md5File file created : " + md5File.exists());
+
       UploadPartRequest request = new UploadPartRequest()
                                             .withBucketName(bucket)
                                             .withKey(key)
                                             .withUploadId(uploadId)
                                             .withSSECustomerKey(sseCustomerKey)
-                                            .withInputStream(inputStream)
                                             .withPartNumber(currentPartNumber)
+                    .withFile(s3File)
                                             .withPartSize(partSize)
                                             .withGeneralProgressListener(progressListener);
+
+            if (connectorConfig.uploadIntegrityCheck()) {
+                try {
+                    FileInputStream fis = new FileInputStream(md5File);
+                    String digest = Base64.getEncoder().encodeToString(DigestUtils.md5(fis));
+                    log.info("Inside uploadPart , digest : " + digest);
+
+                    request.setMd5Digest(digest);
+                } catch (Exception e) {
+                    log.error("Error calculating md5 digest for part {} for id '{}'; skipping check", e);
+                }
+            }
       log.debug("Uploading part {} for id '{}'", currentPartNumber, uploadId);
       partETags.add(s3.uploadPart(request).getPartETag());
+            s3File.delete();
+            log.info("Done upload");
     }
 
     public void complete() throws IOException {

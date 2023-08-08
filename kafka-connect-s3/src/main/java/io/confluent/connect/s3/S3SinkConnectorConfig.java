@@ -163,6 +163,8 @@ public class S3SinkConnectorConfig extends StorageSinkConnectorConfig {
   public static final String BEHAVIOR_ON_NULL_VALUES_CONFIG = "behavior.on.null.values";
   public static final String BEHAVIOR_ON_NULL_VALUES_DEFAULT = OutputWriteBehavior.FAIL.toString();
 
+    public static final String UPLOAD_INTEGRITY_CHECK = "upload.integrity.check";
+    public static final boolean UPLOAD_INTEGRITY_CHECK_DEFAULT = false;
   /**
    * Maximum back-off time when retrying failed requests.
    */
@@ -182,7 +184,7 @@ public class S3SinkConnectorConfig extends StorageSinkConnectorConfig {
   public static final Class<? extends Format> HEADERS_FORMAT_CLASS_DEFAULT = AvroFormat.class;
 
   /**
-   * Elastic buffer to save memory. {@link io.confluent.connect.s3.storage.S3OutputStream#buffer}
+     * Elastic buffer to save memory.
    */
 
   public static final String ELASTIC_BUFFER_ENABLE = "s3.elastic.buffer.enable";
@@ -649,6 +651,22 @@ public class S3SinkConnectorConfig extends StorageSinkConnectorConfig {
           "Behavior for null-valued records"
       );
 
+            configDef.define(
+                    UPLOAD_INTEGRITY_CHECK,
+                    Type.BOOLEAN,
+                    UPLOAD_INTEGRITY_CHECK_DEFAULT,
+                    Importance.LOW,
+                    "Enable or disable integrity checks while uploading parts during "
+                            + " a multi-part upload. If true, the MD5 digest of each part would be sent "
+                            + "which would then be used to verify a successful transfer of the part. "
+                            + "Else, no MD5 digest would be sent and the integrity "
+                            + "of data during upload cannot be guaranteed.",
+                    group,
+                    ++orderInGroup,
+                    Width.SHORT,
+                    "Upload Integrity Check"
+            );
+
       // This is done to avoid aggressive schema based rotations resulting out of interleaving
       // of tombstones with regular records.
       configDef.define(
@@ -859,6 +877,11 @@ public class S3SinkConnectorConfig extends StorageSinkConnectorConfig {
   public int getPartSize() {
     return getInt(PART_SIZE_CONFIG);
   }
+
+    public boolean uploadIntegrityCheck() {
+        return getBoolean(UPLOAD_INTEGRITY_CHECK);
+    }
+
 
   @SuppressWarnings("unchecked")
   public AWSCredentialsProvider getCredentialsProvider() {
