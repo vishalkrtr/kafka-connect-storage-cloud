@@ -38,12 +38,18 @@ import org.slf4j.LoggerFactory;
 import org.apache.commons.codec.digest.DigestUtils;
 
 import java.io.*;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.Paths;
 import java.security.DigestInputStream;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
-import java.util.*;
+import java.util.Base64;
 
 import java.nio.ByteBuffer;
+import java.util.ArrayList;
+import java.util.Date;
+import java.util.List;
 import java.util.function.Supplier;
 
 /**
@@ -257,15 +263,12 @@ public class S3OutputStream extends PositionOutputStream {
             );
         }
 
-        public HashMap convertByteArrayInputStreamToFile(ByteArrayInputStream inputStream, String filePath) {
-            HashMap returnMap = new HashMap<>();
-            Integer fileLineCount = 0;
+        public File convertByteArrayInputStreamToFile(ByteArrayInputStream inputStream, String filePath) {
             File file = new File(filePath);
             try (FileOutputStream fileOutputStream = new FileOutputStream(file)) {
                 byte[] buffer = new byte[1024];
                 int bytesRead;
                 while ((bytesRead = inputStream.read(buffer)) != -1) {
-                    fileLineCount = fileLineCount + 1;
                     fileOutputStream.write(buffer, 0, bytesRead);
                 }
             } catch (IOException e) {
@@ -279,10 +282,20 @@ public class S3OutputStream extends PositionOutputStream {
                     e.printStackTrace();
                 }
             }
-            returnMap.put("fileLineCount", fileLineCount);
-            returnMap.put("sourceFile", file);
             log.info("Success in file creation");
-            return returnMap;
+            return file;
+        }
+
+        public long countLine(String fileName) {
+            Path path = Paths.get(fileName);
+            long lines = 0;
+            try {
+                lines = Files.lines(path).count();
+            } catch (IOException e) {
+                e.printStackTrace();
+            }
+            log.info("Inside countLine , fileName : "+fileName + " , lines : "+lines);
+            return lines;
         }
 
 
@@ -291,19 +304,18 @@ public class S3OutputStream extends PositionOutputStream {
             String subUploadId = uploadId.substring(uploadId.length() - 10);
             String sourceFilePath = "/tmp/tempfile/tempSourceFile" + subUploadId + String.valueOf(new Date().getTime()) + ".json";
             String md5FilePath = "/tmp/tempfile/tempMD5File" + subUploadId + String.valueOf(new Date().getTime()) + ".json";
-            HashMap s3FileMap = convertByteArrayInputStreamToFile(inputStream, sourceFilePath);
+            File s3File = convertByteArrayInputStreamToFile(inputStream, sourceFilePath);
             File md5File = new File(md5FilePath);
-            File s3File = (File) s3FileMap.get("sourceFile");
+            long sourceLineCount = countLine(sourceFilePath);
+            sourceLineCount = sourceLineCount - 1;
 
-            Integer sourceFileLine = (Integer) s3FileMap.get("fileLineCount");
-            log.info("Inside uploadPart , sourceFileLine : " + sourceFileLine);
             try (BufferedReader reader = new BufferedReader(new FileReader(s3File));
                  BufferedWriter writer = new BufferedWriter(new FileWriter(md5File))) {
 
                 String line;
                 int lineCount = 0;
 
-                while ((line = reader.readLine()) != null && lineCount < sourceFileLine) {
+                while ((line = reader.readLine()) != null && lineCount < sourceLineCount) {
                     writer.write(line);
                     writer.newLine();
                     lineCount++;
@@ -312,7 +324,7 @@ public class S3OutputStream extends PositionOutputStream {
             } catch (IOException e) {
                 e.printStackTrace();
             }
-            log.info("Inside uploadPart md5File file created : " + md5File.exists());
+            log.debug("Inside uploadPart md5File file created : " + md5File.exists());
 
             UploadPartRequest request = new UploadPartRequest()
                     .withBucketName(bucket)
